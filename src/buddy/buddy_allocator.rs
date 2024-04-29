@@ -1,3 +1,5 @@
+use xxos_log::{error, info};
+
 use super::def::{MemPtr, MAX_PAGES, PAGE_SIZE};
 use crate::{
     align_down, align_up,
@@ -65,6 +67,11 @@ impl BuddyAllocator {
         let mut zone = start as *mut BinTree;
         let mut page_counts = (end - start) / PAGE_SIZE;
 
+        info!(
+            "BuddyAllocator::init(bottom: {:#x}, top: {:#x}) start",
+            bottom, top
+        );
+
         if page_counts > MAX_PAGES {
             panic!("size is too big.");
         } else if page_counts < size_of::<BinTree>() / PAGE_SIZE {
@@ -77,6 +84,13 @@ impl BuddyAllocator {
         self.zone = start as *mut BinTree;
         self.page_counts = page_counts;
 
+        info!(
+            "mem_start: {:#x} mem_end: {:#x} pages: {}",
+            start,
+            start + page_counts * PAGE_SIZE,
+            page_counts
+        );
+
         match (*self.zone).init(self.zone as usize, PAGE_SIZE * self.page_counts) {
             Ok(counts) => {
                 // 直接使用待管理内存的前几页保存该分配器，因此设置为used
@@ -88,9 +102,13 @@ impl BuddyAllocator {
                 }
 
                 self.page_counts = counts - used;
+                info!(
+                    "buddy initialize successfuly, have {} free pages.",
+                    self.page_counts
+                );
             }
             Err(_) => {
-                panic!("");
+                panic!("buddy initialize failure");
             }
         }
     }
@@ -98,6 +116,12 @@ impl BuddyAllocator {
     // 分配内存，需要提供待分配内存大小
     /// # Safety
     pub unsafe fn allocate(&mut self, layout: Layout) -> Result<MemPtr, BuddyErr> {
+        info!(
+            "BuddyAllocator::allocate({:#x}, align_size: {:#x}) start",
+            layout.size(),
+            layout.align()
+        );
+
         let size = layout.size();
         let align_size = layout.align();
         let mem_size = align_up!(size, PAGE_SIZE);
@@ -136,11 +160,16 @@ impl BuddyAllocator {
                 if (*self.zone).can_use(left_leaf, counts) {
                     (*self.zone).use_mem(idx);
                     self.page_counts -= counts;
+
+                    info!("allocate {} pages successfuly.", counts);
+
                     Ok(addr)
                 } else {
+                    error!("memory have already to used.");
                     Err(BuddyErr::NotFound)
                 }
             } else {
+                error!("can't find fit size pages.");
                 Err(BuddyErr::NotFound)
             }
         }
@@ -149,6 +178,10 @@ impl BuddyAllocator {
     // 释放内存，需要提供起始地址和内存大小
     /// # Safety
     pub unsafe fn deallocate(&mut self, addr: MemPtr, size: usize) -> Result<usize, BuddyErr> {
+        info!(
+            "BuddyAllocator::deallocate(addr: {:#x}, size: {:#x}) start",
+            addr, size
+        );
         let counts = size / PAGE_SIZE;
 
         // 地址和大小需要对齐
@@ -206,27 +239,11 @@ pub mod buddy_tests {
         let bottom = &test_mem[0] as *const _ as usize;
         let top = &test_mem[PAGE_SIZE * PAGE_COUNTS / 8 - 1] as *const _ as usize;
 
-        info!(
-            "BuddyAllocator::new(bottom: {:#x}, top: {:#x})",
-            bottom, top
-        );
-
         let mut buddy = BuddyAllocator::new();
         unsafe { buddy.init(bottom, top) };
 
-        info!(
-            "start: {:#x} end: {:#x} free pages: {}",
-            buddy.zone as usize,
-            buddy.zone as usize + buddy.page_counts * PGSZ,
-            buddy.page_counts
-        );
         assert_eq!(align_up!(bottom, MIN_SIZE), buddy.zone as usize);
 
-        info!(
-            "BuddyAllocator::allocate(size: {:x}, align_size: {:#x})",
-            PAGE_SIZE,
-            PAGE_SIZE << 1
-        );
         let mut addr1 =
             unsafe { buddy.allocate(Layout::from_size_align(PAGE_SIZE, PAGE_SIZE << 1).unwrap()) };
         match addr1 {
@@ -244,11 +261,6 @@ pub mod buddy_tests {
             }
         }
 
-        info!(
-            "BuddyAllocator::allocate({:#x}, align_size: {:#x})",
-            PAGE_SIZE << 1,
-            PAGE_SIZE
-        );
         let mut addr2 =
             unsafe { buddy.allocate(Layout::from_size_align(PAGE_SIZE << 1, PAGE_SIZE).unwrap()) };
         match addr2 {
@@ -261,10 +273,6 @@ pub mod buddy_tests {
             }
         }
 
-        info!(
-            "BuddyAllocator::allocate({:#x}, align_size: {:#x})",
-            PAGE_SIZE, PAGE_SIZE
-        );
         let addr3 =
             unsafe { buddy.allocate(Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap()) };
         match addr3 {
@@ -277,10 +285,8 @@ pub mod buddy_tests {
             }
         }
 
-        info!("BuddyAllocator::deallocate({:#x})", addr1.as_ref().unwrap());
         let free1 = unsafe { buddy.deallocate(addr1.unwrap(), PAGE_SIZE) }.unwrap();
         assert_eq!(399, free1);
-        info!("BuddyAllocator::deallocate({:#x})", addr2.as_ref().unwrap());
         let free2 = unsafe { buddy.deallocate(addr2.unwrap(), PAGE_SIZE << 1) }.unwrap();
         assert_eq!(200, free2);
 
